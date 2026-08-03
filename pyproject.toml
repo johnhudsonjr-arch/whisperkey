@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whisperkey"
+version = "0.1.0"
+description = "System-wide push-to-talk dictation for Linux/X11, transcribed locally on the GPU"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# NOTE: pynput is intentionally absent from this list. Its Linux dependency
+# 'evdev' is a C extension with no prebuilt wheel, so `pip install pynput` fails
+# without the python3-dev headers (i.e. root). Its X11 backend needs only
+# python-xlib, so install.sh does `pip install --no-deps pynput` instead.
+dependencies = [
+    "faster-whisper>=1.1",
+    "numpy>=1.24",
+    "python-xlib>=0.33",
+    "six>=1.16",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12>=9,<10",
+]
+
+[project.scripts]
+whisperkey = "whisperkey.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["whisperkey*"]

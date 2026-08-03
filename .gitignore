@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Test fixture is downloaded by hand; keep the repo light.
+tests/fixtures/*.flac
+tests/fixtures/*.wav

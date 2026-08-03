@@ -89,9 +89,26 @@ class Injector:
             return override
         return self.cfg.method
 
+    def is_terminal(self, wm_class: str) -> bool:
+        """Whether this window needs Ctrl+Shift+V rather than Ctrl+V.
+
+        Matching runs in *both* directions on purpose. A window's WM_CLASS and
+        its process name often differ by a suffix -- GNOME Terminal reports
+        "gnome-terminal" while its binary is "gnome-terminal-server" -- and a
+        one-directional substring test silently misses whichever of the pair is
+        shorter. That failure is invisible: the paste is sent as Ctrl+V, the
+        terminal ignores it, and no text appears with nothing logged as wrong.
+        """
+        if not wm_class:
+            return False
+        wm_class = wm_class.lower()
+        for entry in (t.lower() for t in self.cfg.terminal_classes):
+            if entry and (entry in wm_class or wm_class in entry):
+                return True
+        return False
+
     def _combo_for(self, wm_class: str) -> str:
-        terminals = {t.lower() for t in self.cfg.terminal_classes}
-        if wm_class and any(t in wm_class for t in terminals):
+        if self.is_terminal(wm_class):
             return self.cfg.terminal_paste_combo
         return self.cfg.paste_combo
 

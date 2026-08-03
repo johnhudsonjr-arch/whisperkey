@@ -81,8 +81,13 @@ class InjectConfig:
     #: WM_CLASS values that need shift+paste. Matched case-insensitively.
     terminal_classes: list[str] = field(
         default_factory=lambda: [
+            # Both spellings: the window reports "gnome-terminal" while the
+            # process is "gnome-terminal-server", and which one X hands back
+            # depends on the window queried.
+            "gnome-terminal",
             "gnome-terminal-server",
             "org.gnome.terminal",
+            "ptyxis",
             "alacritty",
             "kitty",
             "org.wezfurlong.wezterm",

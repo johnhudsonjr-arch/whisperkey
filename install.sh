@@ -48,6 +48,49 @@ if [ ! -x "$PY" ]; then
       || die "could not create a virtualenv"
   fi
 fi
+
+# A virtualenv hard-codes absolute paths in three places that matter: the shebang
+# of every console script, pyvenv.cfg, and the editable-install finder that lets
+# `import whisperkey` resolve from any directory. Moving the project directory
+# leaves all of them pointing at the old location -- systemd then dies with
+# 203/EXEC and `whisperkey` disappears from the shell. Reusing an existing venv
+# (just above) does not fix any of that, because .venv/bin/python is a symlink to
+# the system interpreter and still resolves after a move. So repair it here.
+relocate_venv() {
+  [ -f "$VENV/pyvenv.cfg" ] || return 0
+
+  # The venv records the command that built it; its last argument is the old root.
+  local oldvenv oldhere files
+  oldvenv=$(sed -n 's/^command = .*[[:space:]]\([^[:space:]]*\)$/\1/p' \
+              "$VENV/pyvenv.cfg" | head -1)
+  # Older pythons omit that line; fall back to a console script's shebang.
+  if [ -z "$oldvenv" ] && [ -f "$VENV/bin/pip" ]; then
+    oldvenv=$(sed -n '1s|^#!\(.*\)/bin/python.*|\1|p' "$VENV/bin/pip")
+  fi
+  [ -n "$oldvenv" ] || return 0
+  [ "$oldvenv" != "$VENV" ] || return 0        # already in the right place
+
+  # Rewriting the project root (not just the venv root) is what repairs the
+  # editable finder, which points at $HERE/whisperkey rather than into .venv.
+  oldhere=$(dirname "$oldvenv")
+  if [ "$oldhere/.venv" != "$oldvenv" ]; then
+    warn "venv was built at $oldvenv, outside its project; not repairing automatically"
+    return 0
+  fi
+
+  files=$({
+    grep -rlF -- "$oldhere" "$VENV/bin" 2>/dev/null || true
+    grep -lF  -- "$oldhere" "$VENV/pyvenv.cfg" 2>/dev/null || true
+    grep -rlF -- "$oldhere" "$VENV"/lib/python*/site-packages/__editable__*.py \
+                            "$VENV"/lib/python*/site-packages/*.dist-info 2>/dev/null || true
+  } | sort -u)
+  [ -n "$files" ] || return 0
+
+  printf '%s\n' "$files" | xargs -d '\n' sed -i "s|$oldhere|$HERE|g"
+  ok "relocated venv (project moved from $oldhere)"
+}
+relocate_venv
+
 if ! "$PY" -m pip --version >/dev/null 2>&1; then
   # Ubuntu ships python3-venv separately and it may be absent. Bootstrapping
   # pip directly avoids needing apt (and therefore root).
@@ -71,7 +114,8 @@ bold "Installing Python dependencies (this pulls ~1.5 GB of CUDA libraries)"
 # it would need python3-dev (i.e. root). Its X11 backend only needs python-xlib,
 # which we installed above, so --no-deps keeps this rootless.
 "$PY" -m pip install --quiet --no-deps pynput || die "could not install pynput"
-"$PY" -m pip install --quiet -e "$HERE" >/dev/null 2>&1 || true
+"$PY" -m pip install --quiet -e "$HERE" \
+  || warn "editable install failed; 'import whisperkey' will not work outside $HERE"
 ok "dependencies installed"
 
 "$PY" - <<'PYEOF' || die "GTK bindings are not importable from the venv"

@@ -71,6 +71,83 @@ class Doctor:
         print(f"  {RED}✗{RESET} {label}" + (f" {DIM}{detail}{RESET}" if detail else ""))
 
 
+def _check_service(doc: Doctor) -> None:
+    """Is the daemon actually running, and is it *this* checkout?
+
+    Every other check below proves a capability -- that X11 is reachable, that
+    the microphone works. None of them notice that the installed unit points at
+    a different directory, which is exactly what happens when the project is
+    moved: systemd fails with 203/EXEC every few seconds while the rest of the
+    diagnostics report perfect health.
+    """
+    unit = "whisperkey.service"
+
+    def systemctl(*args: str) -> str:
+        try:
+            proc = subprocess.run(["systemctl", "--user", *args],
+                                  capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return proc.stdout.strip()
+
+    state = systemctl("is-active", unit)
+    if not state:
+        doc.warn("systemd user session unavailable", "cannot check the daemon")
+    elif state == "active":
+        doc.ok("daemon running", unit)
+    else:
+        detail = f"state={state}"
+        status = systemctl("show", unit, "-p", "ExecMainStatus", "--value")
+        if status and status != "0":
+            detail += f" exit={status}"
+            if status == "203":
+                detail += " (executable not found -- re-run ./install.sh)"
+        doc.fail("daemon not running",
+                 detail + "; see journalctl --user -u whisperkey")
+
+    # ExecStart renders as "{ path=/...python ; argv[]=... ; ... }" -- note the
+    # brace is glued to the first field, so strip it before matching.
+    installed = ""
+    for field in systemctl("show", unit, "-p", "ExecStart", "--value").split(";"):
+        field = field.strip().lstrip("{").strip()
+        if field.startswith("path="):
+            installed = field[len("path="):].strip()
+            break
+    if installed:
+        # Compare virtualenv roots, not interpreter binaries. .venv/bin/python is
+        # a symlink to the system interpreter, so resolving the two paths
+        # collapses them onto /usr/bin/python3.x and the comparison succeeds no
+        # matter which checkout the unit actually points at.
+        installed_prefix = os.path.normpath(str(Path(installed).parent.parent))
+        if sys.prefix == sys.base_prefix:
+            doc.warn("not running from the virtualenv",
+                     "cannot compare the installed service against this checkout")
+        elif installed_prefix != os.path.normpath(sys.prefix):
+            doc.fail("the installed service points at a different checkout",
+                     f"{installed_prefix} != {sys.prefix} -- re-run ./install.sh")
+        else:
+            doc.ok("service matches this checkout", installed)
+
+    # The unit sets no WorkingDirectory, so the daemon resolves the package
+    # purely through the editable-install finder. A finder left pointing at an
+    # old path still imports fine from the project directory and nowhere else --
+    # including under systemd. Probe from "/" so only the finder can satisfy it.
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "import whisperkey, sys; sys.stdout.write(whisperkey.__file__)"],
+            capture_output=True, text=True, timeout=30, cwd="/",
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        doc.warn("could not probe the package import", str(exc))
+        return
+    if probe.returncode == 0:
+        doc.ok("package importable from any directory", probe.stdout.strip())
+    else:
+        doc.fail("package not importable outside the project directory",
+                 "the editable install points at a stale path -- re-run ./install.sh")
+
+
 def cmd_doctor(args) -> int:
     from . import config as config_mod
     from . import xsession
@@ -89,6 +166,9 @@ def cmd_doctor(args) -> int:
         doc.ok("X display reachable", f"{display} auth={xauth or 'default'}")
     except RuntimeError as exc:
         doc.fail("no X display", str(exc))
+
+    print("\nService")
+    _check_service(doc)
 
     print("\nInput and injection")
     try:

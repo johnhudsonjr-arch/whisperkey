@@ -26,7 +26,7 @@ from .gtk3 import GLib
 from . import postprocess, xsession
 from .config import SOCKET_PATH, Config
 from .history import History
-from .hotkey import Action, HotkeyListener
+from .hotkey import Action, HotkeyListener, PortalHotkeyListener
 from .injector import Injector
 from .recorder import Recorder, RecorderError
 from .sounds import Sounds
@@ -68,21 +68,33 @@ class Daemon:
         self._last_text = ""
         self._stopping = False
 
+    # -- backend selection -------------------------------------------------
+
+    def _make_listener(self):
+        """Pick the hotkey backend for this session type. Does not start it."""
+        if not self.wayland:
+            return HotkeyListener(self.cfg.hotkey, self._on_action)
+        if self.cfg.hotkey.abort_key:
+            log.info("abort key %r is X11-only and is inactive on Wayland",
+                     self.cfg.hotkey.abort_key)
+        return PortalHotkeyListener(self.cfg.hotkey, self._on_action)
+
     # -- lifecycle ---------------------------------------------------------
 
     def run(self) -> int:
-        if xsession.is_wayland():
-            log.error("this session is Wayland; WhisperKey needs X11")
-            self.notifier.send("WhisperKey cannot start",
-                               "This is a Wayland session. Log in with "
-                               "'Ubuntu on Xorg' to use WhisperKey.",
-                               urgency="critical")
-            return 2
-        try:
-            xsession.ensure_display()
-        except RuntimeError as exc:
-            log.error("%s", exc)
-            return 2
+        # X11 is no longer a precondition. GNOME 49 dropped the X11 session and
+        # Ubuntu 26.04 ships no /usr/share/xsessions at all, so refusing to start
+        # on Wayland would mean refusing to start on a current desktop. The
+        # portal backends cover both jobs X11 used to do; see whisperkey.portal.
+        self.wayland = xsession.is_wayland()
+        if self.wayland:
+            log.info("Wayland session; using the desktop portals for input")
+        else:
+            try:
+                xsession.ensure_display()
+            except RuntimeError as exc:
+                log.error("%s", exc)
+                return 2
 
         self.sounds.ensure()
         self._set_state("loading")
@@ -114,14 +126,26 @@ class Daemon:
             except RecorderError as exc:
                 log.error("pre-roll capture unavailable: %s", exc)
 
-        self.listener = HotkeyListener(self.cfg.hotkey, self._on_action)
+        self.listener = self._make_listener()
         try:
             self.listener.start()
         except Exception as exc:
-            log.exception("could not register the hotkey")
-            self.notifier.send("WhisperKey failed to start", str(exc),
-                               urgency="critical")
-            return 1
+            if not self.wayland:
+                log.exception("could not register the hotkey")
+                self.notifier.send("WhisperKey failed to start", str(exc),
+                                   urgency="critical")
+                return 1
+            # On Wayland a refused shortcut is not fatal. The socket "toggle"
+            # verb still works, so a GNOME custom keybinding pointed at
+            # `whisperkey toggle` keeps dictation usable -- strictly better than
+            # exiting and having systemd restart us every three seconds forever.
+            log.error("the GlobalShortcuts portal refused the hotkey: %s", exc)
+            self.notifier.send(
+                "WhisperKey has no hotkey",
+                "The desktop refused the global shortcut. Bind a key to "
+                "'whisperkey toggle' in Settings > Keyboard to dictate.",
+                urgency="critical")
+            self.listener = None
 
         self._start_control_socket()
         self._set_state("idle")

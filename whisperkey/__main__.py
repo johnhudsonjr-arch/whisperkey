@@ -70,6 +70,10 @@ class Doctor:
         self.failures += 1
         print(f"  {RED}✗{RESET} {label}" + (f" {DIM}{detail}{RESET}" if detail else ""))
 
+    def note(self, text: str) -> None:
+        """Neither good nor bad -- context that changes how a result reads."""
+        print(f"  {DIM}· {text}{RESET}")
+
 
 def _check_service(doc: Doctor) -> None:
     """Is the daemon actually running, and is it *this* checkout?
@@ -148,6 +152,35 @@ def _check_service(doc: Doctor) -> None:
                  "the editable install points at a stale path -- re-run ./install.sh")
 
 
+def _check_portals(doc) -> None:
+    """Are the two portals WhisperKey needs actually on the bus?
+
+    Presence is all this checks. Whether the compositor will *grant* a shortcut
+    or a RemoteDesktop session is only knowable by asking, and asking puts a
+    consent dialog on screen -- not something a diagnostic should do.
+    """
+    try:
+        from .gtk3 import Gio, GLib
+        from . import portal as portal_mod
+
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        for label, iface in (("GlobalShortcuts portal (hotkey)",
+                              portal_mod.GLOBAL_SHORTCUTS),
+                             ("RemoteDesktop portal (paste)",
+                              portal_mod.REMOTE_DESKTOP)):
+            try:
+                reply = bus.call_sync(
+                    portal_mod.PORTAL_BUS, portal_mod.PORTAL_PATH,
+                    "org.freedesktop.DBus.Properties", "Get",
+                    GLib.Variant("(ss)", (iface, "version")), None,
+                    Gio.DBusCallFlags.NONE, 3000, None)
+                doc.ok(label, f"version {reply.unpack()[0]}")
+            except Exception as exc:
+                doc.fail(f"{label} missing", f"{type(exc).__name__}: {exc}")
+    except Exception as exc:
+        doc.fail("cannot reach the session bus", f"{type(exc).__name__}: {exc}")
+
+
 def cmd_doctor(args) -> int:
     from . import config as config_mod
     from . import xsession
@@ -155,37 +188,58 @@ def cmd_doctor(args) -> int:
     doc = Doctor()
     print("\nWhisperKey diagnostics\n")
 
+    wayland = xsession.is_wayland()
+
     print("Session")
-    if xsession.is_wayland():
-        doc.fail("Wayland session detected",
-                 "log in with 'Ubuntu on Xorg' -- X11 is required")
+    if wayland:
+        doc.ok("Wayland session", "input goes through the desktop portals")
+        _check_portals(doc)
     else:
         doc.ok("X11 session", os.environ.get("XDG_SESSION_TYPE", "?"))
-    try:
-        display, xauth = xsession.ensure_display()
-        doc.ok("X display reachable", f"{display} auth={xauth or 'default'}")
-    except RuntimeError as exc:
-        doc.fail("no X display", str(exc))
+        try:
+            display, xauth = xsession.ensure_display()
+            doc.ok("X display reachable", f"{display} auth={xauth or 'default'}")
+        except RuntimeError as exc:
+            doc.fail("no X display", str(exc))
 
     print("\nService")
     _check_service(doc)
 
     print("\nInput and injection")
-    try:
-        from pynput import keyboard
-
-        keyboard.Controller()
-        doc.ok("pynput XTEST backend", keyboard.Listener.__module__)
-    except Exception as exc:
-        doc.fail("pynput unavailable", f"{type(exc).__name__}: {exc}")
-    try:
+    if wayland:
         from .config import load
-        from .injector import Injector
+        from .hotkey import accelerator_for
 
-        wm = Injector(load().inject).active_window_class()
-        doc.ok("focused-window detection", f"WM_CLASS={wm or 'unknown'}")
-    except Exception as exc:
-        doc.fail("cannot read the focused window", str(exc))
+        cfg_hotkey = load().hotkey
+        try:
+            doc.ok("hotkey trigger requested",
+                   f"{cfg_hotkey.key} -> {accelerator_for(cfg_hotkey.key)}")
+        except ValueError as exc:
+            doc.fail("hotkey not translatable to an accelerator", str(exc))
+        if cfg_hotkey.abort_key:
+            doc.note(f"abort key {cfg_hotkey.abort_key!r} is X11-only and inactive here")
+        # No compositor tells an ordinary client what has focus, so the per-app
+        # paste chord cannot be chosen. Say which one every window will get.
+        combo = load().inject.paste_combo
+        doc.warn("focused-window detection unavailable",
+                 f"Wayland; every window gets {combo!r} "
+                 f"(terminals usually need ctrl+shift+v)")
+    else:
+        try:
+            from pynput import keyboard
+
+            keyboard.Controller()
+            doc.ok("pynput XTEST backend", keyboard.Listener.__module__)
+        except Exception as exc:
+            doc.fail("pynput unavailable", f"{type(exc).__name__}: {exc}")
+        try:
+            from .config import load
+            from .injector import Injector
+
+            wm = Injector(load().inject).active_window_class()
+            doc.ok("focused-window detection", f"WM_CLASS={wm or 'unknown'}")
+        except Exception as exc:
+            doc.fail("cannot read the focused window", str(exc))
     try:
         import gi
 

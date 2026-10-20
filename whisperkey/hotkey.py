@@ -193,3 +193,88 @@ class HotkeyListener:
             self._emit(self.machine.on_release())
         except Exception:
             log.exception("hotkey release handler failed")
+
+
+#: pynput key names -> X keysym names, which is what a GTK accelerator (and
+#: therefore the GlobalShortcuts portal's ``preferred_trigger``) is written in.
+#: Only keys worth binding as a dictation trigger are listed; anything absent
+#: falls through to a capitalised guess, which covers F-keys and plain letters.
+_ACCELERATOR_NAMES = {
+    "cmd": "Super_L", "cmd_l": "Super_L", "cmd_r": "Super_R",
+    "ctrl": "Control_L", "ctrl_l": "Control_L", "ctrl_r": "Control_R",
+    "alt": "Alt_L", "alt_l": "Alt_L", "alt_r": "Alt_R", "alt_gr": "ISO_Level3_Shift",
+    "shift": "Shift_L", "shift_l": "Shift_L", "shift_r": "Shift_R",
+    "caps_lock": "Caps_Lock", "scroll_lock": "Scroll_Lock", "num_lock": "Num_Lock",
+    "menu": "Menu", "pause": "Pause", "esc": "Escape", "space": "space",
+}
+
+
+def accelerator_for(name: str) -> str:
+    """Translate a config key name into a GTK accelerator string."""
+    name = (name or "").strip().lower()
+    if not name:
+        raise ValueError("no hotkey configured")
+    mapped = _ACCELERATOR_NAMES.get(name)
+    if mapped:
+        return mapped
+    if len(name) == 1:
+        return name
+    if name.startswith("f") and name[1:].isdigit():
+        return name.upper()
+    # Last resort: Keysym_Case is the usual spelling for multi-word keys.
+    return "_".join(part.capitalize() for part in name.split("_"))
+
+
+class PortalHotkeyListener:
+    """Drives a :class:`HotkeyMachine` from GlobalShortcuts portal signals.
+
+    Deliberately the same shape as :class:`HotkeyListener` -- ``start``, ``stop``,
+    ``enabled``, ``machine`` -- so the daemon selects a backend once and the rest
+    of it never learns which session type it is running on.
+
+    Two things X11 gave us for free are gone here and both are fine. Auto-repeat
+    filtering is unnecessary because the portal reports one Activated per physical
+    press. The abort key cannot be watched at all: a portal shortcut has to be
+    bound and consented to individually, and silently claiming a second global key
+    would be worse than losing it. Escape-to-abort therefore only works on X11,
+    and the daemon says so at startup rather than leaving it to be discovered.
+    """
+
+    def __init__(self, cfg, on_action: Callable[[Action], None]):
+        from .portal import GlobalShortcutsHotkey
+
+        self.cfg = cfg
+        self._on_action = on_action
+        self.machine = HotkeyMachine(cfg.hold_min_ms, cfg.double_tap_ms)
+        self.enabled = cfg.enabled
+        self._shortcut = GlobalShortcutsHotkey(
+            trigger=accelerator_for(cfg.key),
+            description="Hold to dictate with WhisperKey",
+            on_press=self._handle_press,
+            on_release=self._handle_release,
+        )
+
+    @property
+    def bound_trigger(self) -> str:
+        return self._shortcut.bound_trigger
+
+    def start(self) -> None:
+        self._shortcut.start()
+        bound = self._shortcut.bound_trigger or accelerator_for(self.cfg.key)
+        log.info("listening for %s via the GlobalShortcuts portal "
+                 "(hold to dictate, double-tap to latch)", bound)
+
+    def stop(self) -> None:
+        self._shortcut.close()
+
+    def _emit(self, action: Action) -> None:
+        if action is not Action.NONE:
+            self._on_action(action)
+
+    def _handle_press(self) -> None:
+        if self.enabled:
+            self._emit(self.machine.on_press())
+
+    def _handle_release(self) -> None:
+        if self.enabled:
+            self._emit(self.machine.on_release())

@@ -4,12 +4,24 @@ Strategy is clipboard-then-synthetic-paste rather than simulated typing: it is
 instant regardless of length and unicode-safe, where typing 300 characters one
 keystroke at a time is slow and drops characters in some toolkits.
 
-Three X11 facilities are used, none of which need root:
+Three facilities are used, none of which need root:
   * python-xlib reads ``_NET_ACTIVE_WINDOW`` to identify the target app, so we
     know whether it needs Ctrl+V or Ctrl+Shift+V.
   * GTK owns the CLIPBOARD selection (the daemon is long-lived, so it can serve
     paste requests -- a one-shot ``xclip`` could not).
   * pynput drives XTEST to synthesise the paste chord.
+
+Under Wayland only the last of those changes: the chord goes through the
+RemoteDesktop portal instead of XTEST. The clipboard is GTK's and was never
+X11-specific, so it carries over untouched.
+
+Window identification, however, is simply gone. No Wayland compositor will tell
+an ordinary client what currently has focus, and GNOME is no exception, so
+``active_window_class`` returns empty there and every window gets the configured
+default chord. That matters in practice: a terminal wants Ctrl+Shift+V and will
+quietly ignore Ctrl+V, pasting nothing. Users who dictate mainly into a terminal
+should set ``inject.paste_combo`` accordingly. ``whisperkey doctor`` says so
+rather than leaving it to be found out.
 """
 
 from __future__ import annotations
@@ -17,6 +29,7 @@ from __future__ import annotations
 import logging
 import time
 
+from . import xsession
 from .config import InjectConfig
 
 log = logging.getLogger(__name__)
@@ -30,6 +43,8 @@ class Injector:
         self._kb = None
         self._display = None
         self._pending_restore = None
+        self._portal = None
+        self.wayland = xsession.is_wayland()
 
     # -- lazy handles ------------------------------------------------------
 
@@ -42,6 +57,17 @@ class Injector:
         return self._kb
 
     @property
+    def portal(self):
+        """Lazily started RemoteDesktop keyboard. Wayland only."""
+        if self._portal is None:
+            from .portal import RemoteDesktopKeyboard
+
+            portal = RemoteDesktopKeyboard()
+            portal.start()
+            self._portal = portal
+        return self._portal
+
+    @property
     def display(self):
         if self._display is None:
             from Xlib import display as xdisplay
@@ -52,7 +78,12 @@ class Injector:
     # -- target identification --------------------------------------------
 
     def active_window_class(self) -> str:
-        """WM_CLASS of the focused window, lowercased. Empty if undeterminable."""
+        """WM_CLASS of the focused window, lowercased. Empty if undeterminable.
+
+        Always empty under Wayland; see the module docstring.
+        """
+        if self.wayland:
+            return ""
         try:
             from Xlib import X
 
@@ -127,6 +158,9 @@ class Injector:
         raise ValueError(f"unknown key {name!r}")
 
     def send_combo(self, combo: str) -> None:
+        if self.wayland:
+            self.portal.send_combo(combo)
+            return
         parts = [p for p in combo.split("+") if p.strip()]
         if not parts:
             return
@@ -197,6 +231,14 @@ class Injector:
         try:
             self.send_combo(self._combo_for(wm_class))
         except Exception:
+            if self.wayland:
+                # Do NOT fall back to typing here. XTEST still "succeeds" under
+                # Xwayland while delivering nothing to a native Wayland window,
+                # so typing would fail invisibly and the transcription would look
+                # lost. It is on the clipboard; say so and let the user paste.
+                log.exception("no synthetic paste available on Wayland; "
+                              "text left on the clipboard")
+                return "clipboard"
             log.exception("paste chord failed; falling back to typing")
             self._type(text)
             return "type"

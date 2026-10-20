@@ -58,13 +58,30 @@ class Injector:
 
     @property
     def portal(self):
-        """Lazily started RemoteDesktop keyboard. Wayland only."""
-        if self._portal is None:
-            from .portal import RemoteDesktopKeyboard
+        """Lazily started Wayland keyboard: uinput first, then the portal.
 
-            portal = RemoteDesktopKeyboard()
-            portal.start()
-            self._portal = portal
+        uinput is preferred where its permissions allow, because the portal is
+        refused outright on current Ubuntu (see :mod:`whisperkey.portal`) and
+        because the kernel path does not depend on which compositor is running.
+        """
+        if self._portal is None:
+            from .evdev_input import UinputKeyboard, permission_problem
+
+            problem = permission_problem()
+            if not problem:
+                kb = UinputKeyboard()
+                kb.start()
+                self._portal = kb
+                log.info("injecting via uinput")
+            else:
+                log.info("uinput unavailable (%s); trying the RemoteDesktop portal",
+                         problem)
+                from .portal import RemoteDesktopKeyboard
+
+                kb = RemoteDesktopKeyboard()
+                kb.start()
+                self._portal = kb
+                log.info("injecting via the RemoteDesktop portal")
         return self._portal
 
     @property

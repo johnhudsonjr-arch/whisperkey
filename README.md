@@ -24,8 +24,9 @@ level meter so you always know it is hearing you.
 
 ## Requirements
 
-- **X11**, not Wayland. Log in with *"Ubuntu on Xorg"* if unsure — GNOME's
-  session type is shown by `echo $XDG_SESSION_TYPE`.
+- **X11 or Wayland.** X11 needs nothing extra; Wayland needs device permissions
+  granted once (`whisperkey doctor` prints the commands). GNOME's session type is
+  shown by `echo $XDG_SESSION_TYPE`.
 - An NVIDIA GPU is strongly recommended (CPU works, but is slow).
 - No root required. See [Why no sudo](#why-no-sudo).
 
@@ -142,9 +143,11 @@ on a stock Ubuntu desktop:
 | Need | How, without root |
 |---|---|
 | Audio capture | `pw-record` (PipeWire, preinstalled). `sounddevice` was avoided because it ships no Linux wheel and would need `libportaudio2` |
-| Global hotkey | `pynput`, installed `--no-deps` — its declared `evdev` dependency is a C extension with no wheel, and is only needed for its Wayland backend |
-| Synthetic paste | X11 XTEST via `pynput`, so no `xdotool` |
-| Focused-window detection | `python-xlib` (pure Python), so no `xdotool` |
+| Global hotkey (X11) | `pynput`, installed `--no-deps` |
+| Global hotkey (Wayland) | `evdev`, reading `/dev/input/event*` directly |
+| Synthetic paste (X11) | XTEST via `pynput`, so no `xdotool` |
+| Synthetic paste (Wayland) | `/dev/uinput`, or the RemoteDesktop portal where allowed |
+| Focused-window detection | `python-xlib` (pure Python), so no `xdotool`; unavailable on Wayland |
 | Clipboard | GTK, via the preinstalled `python3-gi` |
 | Status | libnotify (preinstalled) |
 
@@ -212,9 +215,28 @@ WhisperKey detects common ones by `WM_CLASS`; add yours to
 shows why. The usual cause is `LD_LIBRARY_PATH` not reaching the pip-installed
 NVIDIA libraries; the systemd unit sets it explicitly.
 
-**Wayland.** Not supported. Global key monitoring and synthetic input both
-require privileges X11 grants freely. The hotkey and injector sit behind small
-interfaces so evdev/uinput backends could be added later.
+**Wayland.** Supported, with one caveat and one cost.
+
+GNOME 49 removed the X11 session and Ubuntu 26.04 ships no `/usr/share/xsessions`
+at all, so "log in with Ubuntu on Xorg" stopped being advice anyone could follow.
+WhisperKey now picks an input backend at startup instead of refusing to run.
+
+The *cost* is root, once. Global key monitoring and synthetic input both need
+device permissions: read access to `/dev/input/event*` (the `input` group) and
+write access to `/dev/uinput` (a udev rule). `whisperkey doctor` prints the two
+commands, and the undo for them, when it finds the permissions missing. Nothing
+escalates on its own. X11 sessions still need none of this.
+
+The *caveat* is that no Wayland compositor will tell an ordinary client which
+window has focus. The per-app paste chord therefore cannot be chosen, and every
+window gets `inject.paste_combo`. If you dictate mainly into a terminal, set that
+to `ctrl+shift+v` -- a terminal silently ignores `ctrl+v` and nothing appears.
+
+The desktop portals are implemented too (`whisperkey/portal.py`) and are the
+better answer in principle, needing no root at all. They are refused on current
+Ubuntu: xdg-desktop-portal 1.21 rejects any app without an app id, and 1.21.1
+ships the Registry that would grant one exported on no reachable bus name. The
+code stays, because it starts working the day that is fixed.
 
 ## License
 

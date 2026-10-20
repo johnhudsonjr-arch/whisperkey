@@ -26,7 +26,8 @@ from .gtk3 import GLib
 from . import postprocess, xsession
 from .config import SOCKET_PATH, Config
 from .history import History
-from .hotkey import Action, HotkeyListener, PortalHotkeyListener
+from .hotkey import (Action, EvdevHotkeyListener, HotkeyListener,
+                     PortalHotkeyListener)
 from .injector import Injector
 from .recorder import Recorder, RecorderError
 from .sounds import Sounds
@@ -74,8 +75,17 @@ class Daemon:
         """Pick the hotkey backend for this session type. Does not start it."""
         if not self.wayland:
             return HotkeyListener(self.cfg.hotkey, self._on_action)
+
+        from . import evdev_input
+
+        # Kernel first: the portal is refused outright on current Ubuntu, and
+        # evdev keeps the abort key, which a portal shortcut cannot.
+        problem = evdev_input.permission_problem()
+        if not problem:
+            return EvdevHotkeyListener(self.cfg.hotkey, self._on_action)
+        log.info("kernel input unavailable (%s); trying the portal", problem)
         if self.cfg.hotkey.abort_key:
-            log.info("abort key %r is X11-only and is inactive on Wayland",
+            log.info("abort key %r needs kernel input and is inactive here",
                      self.cfg.hotkey.abort_key)
         return PortalHotkeyListener(self.cfg.hotkey, self._on_action)
 
@@ -139,23 +149,36 @@ class Daemon:
             # verb still works, so a GNOME custom keybinding pointed at
             # `whisperkey toggle` keeps dictation usable -- strictly better than
             # exiting and having systemd restart us every three seconds forever.
-            log.error("the GlobalShortcuts portal refused the hotkey: %s", exc)
+            log.error("no hotkey backend is usable: %s", exc)
             self.notifier.send(
                 "WhisperKey has no hotkey",
-                "The desktop refused the global shortcut. Bind a key to "
-                "'whisperkey toggle' in Settings > Keyboard to dictate.",
+                "Run 'whisperkey doctor' for the two commands that enable "
+                "kernel input. Until then, a key bound to 'whisperkey toggle' "
+                "still works.",
                 urgency="critical")
             self.listener = None
 
         self._start_control_socket()
         self._set_state("idle")
         device = self.transcriber.device
-        log.info("ready -- hold %s to dictate (%s)", self.cfg.hotkey.key, device)
-        self.notifier.send(
-            "WhisperKey ready",
-            f"Hold {self._key_label()} to dictate, double-tap to latch. "
-            f"({device})",
-        )
+        if self.listener is None:
+            # Saying "hold cmd_l to dictate" with no hotkey registered is the
+            # kind of confident wrongness that sends people hunting for a broken
+            # microphone, so say what is actually true instead.
+            log.info("ready -- no hotkey; use a key bound to 'whisperkey "
+                     "toggle' (%s)", device)
+            self.notifier.send(
+                "WhisperKey ready, without a hotkey",
+                f"Dictate with a key bound to 'whisperkey toggle'. ({device})",
+            )
+        else:
+            log.info("ready -- hold %s to dictate (%s)",
+                     self.cfg.hotkey.key, device)
+            self.notifier.send(
+                "WhisperKey ready",
+                f"Hold {self._key_label()} to dictate, double-tap to latch. "
+                f"({device})",
+            )
 
         self._loop = GLib.MainLoop()
         try:

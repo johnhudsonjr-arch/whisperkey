@@ -114,6 +114,13 @@ bold "Installing Python dependencies (this pulls ~1.5 GB of CUDA libraries)"
 # it would need python3-dev (i.e. root). Its X11 backend only needs python-xlib,
 # which we installed above, so --no-deps keeps this rootless.
 "$PY" -m pip install --quiet --no-deps pynput || die "could not install pynput"
+# evdev is what makes WhisperKey work on Wayland: the desktop portals are
+# refused for non-sandboxed apps on current Ubuntu, so reading /dev/input and
+# writing /dev/uinput is the only path left. It is a C extension and needs the
+# python3-dev headers, which is the one thing here that may be absent -- so a
+# failure warns rather than dies. X11 sessions never need it.
+"$PY" -m pip install --quiet evdev \
+  || warn "evdev did not build (needs python3-dev); Wayland input will be unavailable"
 "$PY" -m pip install --quiet -e "$HERE" \
   || warn "editable install failed; 'import whisperkey' will not work outside $HERE"
 ok "dependencies installed"

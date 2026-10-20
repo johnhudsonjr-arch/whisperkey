@@ -152,6 +152,27 @@ def _check_service(doc: Doctor) -> None:
                  "the editable install points at a stale path -- re-run ./install.sh")
 
 
+def _print_uinput_fix() -> None:
+    """The two commands that turn the kernel backend on.
+
+    Printed rather than run. This is the only part of WhisperKey that needs
+    root, and the installer's whole premise is that it never asks for it, so the
+    decision stays with whoever is reading.
+    """
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or "$USER"
+    print(f"""
+    {DIM}Kernel input needs one-time root. Two commands, then log out and back in:{RESET}
+
+      echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \\
+        | sudo tee /etc/udev/rules.d/99-whisperkey-uinput.rules
+      sudo usermod -aG input {user} && sudo udevadm control --reload-rules \\
+        && sudo udevadm trigger --subsystem-match=misc
+
+    {DIM}To undo: sudo rm /etc/udev/rules.d/99-whisperkey-uinput.rules{RESET}
+    {DIM}         sudo gpasswd -d {user} input{RESET}
+""")
+
+
 def _check_portals(doc) -> None:
     """Are the two portals WhisperKey needs actually on the bus?
 
@@ -207,22 +228,27 @@ def cmd_doctor(args) -> int:
 
     print("\nInput and injection")
     if wayland:
+        from . import evdev_input
         from .config import load
-        from .hotkey import accelerator_for
 
-        cfg_hotkey = load().hotkey
+        cfg_all = load()
+        problem = evdev_input.permission_problem()
+        if not problem:
+            doc.ok("kernel input (evdev + uinput)", "hotkey and paste both work")
+        else:
+            doc.fail("kernel input unavailable", problem)
+            _print_uinput_fix()
         try:
-            doc.ok("hotkey trigger requested",
-                   f"{cfg_hotkey.key} -> {accelerator_for(cfg_hotkey.key)}")
-        except ValueError as exc:
-            doc.fail("hotkey not translatable to an accelerator", str(exc))
-        if cfg_hotkey.abort_key:
-            doc.note(f"abort key {cfg_hotkey.abort_key!r} is X11-only and inactive here")
+            doc.ok("hotkey key resolves",
+                   f"{cfg_all.hotkey.key} -> code {evdev_input.code_for(cfg_all.hotkey.key)}")
+        except Exception as exc:
+            doc.fail("hotkey name not recognised", str(exc))
+        if problem and cfg_all.hotkey.abort_key:
+            doc.note(f"abort key {cfg_all.hotkey.abort_key!r} needs kernel input")
         # No compositor tells an ordinary client what has focus, so the per-app
         # paste chord cannot be chosen. Say which one every window will get.
-        combo = load().inject.paste_combo
         doc.warn("focused-window detection unavailable",
-                 f"Wayland; every window gets {combo!r} "
+                 f"Wayland; every window gets {cfg_all.inject.paste_combo!r} "
                  f"(terminals usually need ctrl+shift+v)")
     else:
         try:

@@ -278,3 +278,52 @@ class PortalHotkeyListener:
     def _handle_release(self) -> None:
         if self.enabled:
             self._emit(self.machine.on_release())
+
+
+class EvdevHotkeyListener:
+    """Drives a :class:`HotkeyMachine` from raw kernel key events.
+
+    Same shape as the other two listeners. Unlike the portal backend this one
+    keeps the abort key, because reading ``/dev/input`` sees every key rather
+    than only the ones a compositor agreed to hand over.
+    """
+
+    def __init__(self, cfg, on_action: Callable[[Action], None]):
+        from .evdev_input import EvdevHotkey
+
+        self.cfg = cfg
+        self._on_action = on_action
+        self.machine = HotkeyMachine(cfg.hold_min_ms, cfg.double_tap_ms)
+        self.enabled = cfg.enabled
+        self._reader = EvdevHotkey(
+            key=cfg.key,
+            abort_key=cfg.abort_key,
+            on_press=self._handle_press,
+            on_release=self._handle_release,
+            on_abort=self._handle_abort,
+        )
+
+    def start(self) -> None:
+        self._reader.start()
+        log.info("listening for %s on %d keyboard(s) via evdev "
+                 "(hold to dictate, double-tap to latch)",
+                 self.cfg.key, self._reader.watched)
+
+    def stop(self) -> None:
+        self._reader.stop()
+
+    def _emit(self, action: Action) -> None:
+        if action is not Action.NONE:
+            self._on_action(action)
+
+    def _handle_press(self) -> None:
+        if self.enabled:
+            self._emit(self.machine.on_press())
+
+    def _handle_release(self) -> None:
+        if self.enabled:
+            self._emit(self.machine.on_release())
+
+    def _handle_abort(self) -> None:
+        if self.machine.recording:
+            self._emit(self.machine.on_abort())
